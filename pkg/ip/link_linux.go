@@ -170,8 +170,8 @@ func SetupVethWithName(contVethName, hostVethName string, mtu int, hostNS ns.Net
 // Call SetupVeth from inside the container netns.  It will create both veth
 // devices and move the host-side veth into the provided hostNS namespace.
 // On success, SetupVeth returns (hostVeth, containerVeth, nil)
-func SetupVeth(contVethName string, mtu int, hostNS ns.NetNS) (net.Interface, net.Interface, error) {
-	return SetupVethWithName(contVethName, "", mtu, hostNS)
+func SetupVeth(contVethName, hostVethName string, mtu int, hostNS ns.NetNS) (net.Interface, net.Interface, error) {
+	return SetupVethWithName(contVethName, hostVethName, mtu, hostNS)
 }
 
 // DelLinkByName removes an interface link.

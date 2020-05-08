@@ -15,6 +15,8 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +38,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/utils"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 )
 
 // For testcases to force an error after IPAM has been performed
@@ -269,7 +272,7 @@ func ensureVlanInterface(br *netlink.Bridge, vlanId int) (netlink.Link, error) {
 			return nil, fmt.Errorf("faild to find host namespace: %v", err)
 		}
 
-		_, brGatewayIface, err := setupVeth(hostNS, br, name, br.MTU, false, vlanId)
+		_, brGatewayIface, err := setupVeth(hostNS, br, name, "", br.MTU, false, vlanId)
 		if err != nil {
 			return nil, fmt.Errorf("faild to create vlan gateway %q: %v", name, err)
 		}
@@ -283,13 +286,12 @@ func ensureVlanInterface(br *netlink.Bridge, vlanId int) (netlink.Link, error) {
 	return brGatewayVeth, nil
 }
 
-func setupVeth(netns ns.NetNS, br *netlink.Bridge, ifName string, mtu int, hairpinMode bool, vlanID int) (*current.Interface, *current.Interface, error) {
+func setupVeth(netns ns.NetNS, br *netlink.Bridge, ifName, hostVethName string, mtu int, hairpinMode bool, vlanID int) (*current.Interface, *current.Interface, error) {
 	contIface := &current.Interface{}
 	hostIface := &current.Interface{}
-
 	err := netns.Do(func(hostNS ns.NetNS) error {
 		// create the veth pair in the container and move host end into host netns
-		hostVeth, containerVeth, err := ip.SetupVeth(ifName, mtu, hostNS)
+		hostVeth, containerVeth, err := ip.SetupVeth(ifName, hostVethName, mtu, hostNS)
 		if err != nil {
 			return err
 		}
@@ -373,12 +375,24 @@ func enableIPForward(family int) error {
 	return ip.EnableIP6Forward()
 }
 
+// generateHostVethName returns a name to be used on the host-side veth device.
+func generateHostVethName(namespace, podname string) string {
+	h := sha1.New()
+	h.Write([]byte(fmt.Sprintf("%s.%s", namespace, podname)))
+	return fmt.Sprintf("veth%s", hex.EncodeToString(h.Sum(nil))[:11])
+}
+
 func cmdAdd(args *skel.CmdArgs) error {
 	var success bool = false
 
 	n, cniVersion, err := loadNetConf(args.StdinData)
 	if err != nil {
 		return err
+	}
+
+	k8sArgs := K8sArgs{}
+	if err := cnitypes.LoadArgs(args.Args, &k8sArgs); err != nil {
+		return fmt.Errorf("failed to load k8s config from arg: %v", err)
 	}
 
 	isLayer3 := n.IPAM.Type != ""
@@ -402,7 +416,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 	defer netns.Close()
 
-	hostInterface, containerInterface, err := setupVeth(netns, br, args.IfName, n.MTU, n.HairpinMode, n.Vlan)
+	hostVethName := generateHostVethName(string(k8sArgs.K8S_POD_NAMESPACE), string(k8sArgs.K8S_POD_NAME))
+	hostInterface, containerInterface, err := setupVeth(netns, br, args.IfName, hostVethName, n.MTU, n.HairpinMode, n.Vlan)
 	if err != nil {
 		return err
 	}
@@ -631,6 +646,23 @@ type cniBridgeIf struct {
 	peerIndex   int
 	masterIndex int
 	found       bool
+}
+
+// K8sArgs is the valid CNI_ARGS used for Kubernetes
+type K8sArgs struct {
+	types.CommonArgs
+
+	// IP is pod's ip address
+	IP net.IP
+
+	// K8S_POD_NAME is pod's name
+	K8S_POD_NAME types.UnmarshallableString
+
+	// K8S_POD_NAMESPACE is pod's namespace
+	K8S_POD_NAMESPACE types.UnmarshallableString
+
+	// K8S_POD_INFRA_CONTAINER_ID is pod's sandbox id
+	K8S_POD_INFRA_CONTAINER_ID types.UnmarshallableString
 }
 
 func validateInterface(intf current.Interface, expectInSb bool) (cniBridgeIf, netlink.Link, error) {
